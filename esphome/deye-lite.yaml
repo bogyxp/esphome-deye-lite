@@ -1,0 +1,685 @@
+# ============================================================
+# ESPHome Lite Module for Deye Hybrid Inverter 
+# ============================================================
+# Lite variant of deye-pro: same MCU, read-only sensors +
+# SmartInject voltage follower. No fan ctrl.
+#
+# Hardware: ESP32 (esp32dev)
+# Pin differences vs pro (esp32dev):
+#   Modbus TX  → GPIO23  (pro: GPIO17)
+#   Modbus RX  → GPIO21  (pro: GPIO16)
+#   Flow ctrl  → GPIO22  (pro: GPIO18)
+#
+# changelog
+# 1.0
+#   Initial lite release — derived from deye-pro 1.2
+#   Full read-only sensor set (PV, grid, battery, temperatures, energy)
+#   SmartInject voltage follower (same logic as pro, triggered on grid_voltage)
+#   Unique hostname via name_add_mac_suffix
+#   api + wifi reboot_timeout: 0s — unit never reboots on HA disconnect
+# 1.1
+#   SmartInject anti-ringing fixes ported from deye-pro 1.2:
+#   Zero-PV guard — skip entirely when PV < 1W (no battery-to-grid push)
+#   Tiered step-down — 253-254V:-250W, 254-255V:-500W, >255V:-1000W
+#   No-change guard — skip Modbus write if value unchanged
+#   Injection ceiling clamp — limit capped at actual_export+500W (prevents OVP on battery-full event)
+# 1.2
+#   All sensitive credentials moved to secrets.yaml (no hardcoded values)
+#   Added web_server authentication — username and password via !secret
+#   Added fallback hotspot password via !secret
+# ============================================================
+#ADD MQTT OR WIREGUARD FOR TELEMETRY
+
+substitutions:
+  module_name: deye-lite
+  modbus_update_interval_fast: 5s
+  skip_updates_no: "12"   # 12 × 5 s = 60 s for slow sensors
+  Grid_Max_V: "253.0"
+
+esphome:
+  name: deye-lite
+  friendly_name: Deye_lite
+  name_add_mac_suffix: true
+  on_boot:
+    then:
+      - number.set:
+          id: max_sell_power
+          value: 500
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: VERBOSE
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  reboot_timeout: 0s
+
+  ap:
+    ssid: "Deye-Lite Fallback Hotspot"
+    password: !secret hotspot_pass
+
+captive_portal:
+
+web_server:
+  port: 80
+  auth:
+    username: !secret web_user
+    password: !secret web_password
+
+button:
+  - platform: restart
+    id: do_restart
+    name: "${module_name}_Restart"
+
+uart:
+  id: mod_bus
+  baud_rate: 9600
+  tx_pin: GPIO23
+  rx_pin: GPIO21
+  rx_buffer_size: 1024
+  data_bits: 8
+  stop_bits: 1
+#  parity: NONE
+#  debug:
+#    direction: BOTH
+#    dummy_receiver: false
+#    sequence:
+#      - lambda: UARTDebug::log_hex(direction, bytes, ' ');
+
+modbus:
+  id: modbus1
+  flow_control_pin: GPIO22
+
+modbus_controller:
+  - id: deye_modbus_controller
+    address: 0x01
+    modbus_id: modbus1
+    setup_priority: -10
+    update_interval: ${modbus_update_interval_fast}
+    command_throttle: 100ms
+    max_cmd_retries: 2
+    allow_duplicate_commands: false
+
+script:
+  - id: voltage_follower_logic
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(pv_power).has_state() &&
+                     id(grid_pwr).has_state() &&
+                     id(grid_voltage).has_state() &&
+                     id(max_sell_power).has_state();
+          then:
+            - if:
+                # Zero-PV guard: no sun at all — do nothing. We never push from battery
+                # to grid, so there is nothing to regulate when PV is absent.
+                condition:
+                  lambda: 'return id(pv_power).state < 1.0;'
+                then:
+                  - logger.log: "PV = 0W — no sun, skipping voltage follower."
+                else:
+                  - if:
+                      # Nighttime / near-zero PV guard. Resets injection limit to a safe
+                      # baseline so the day never starts with yesterday's accumulated limit.
+                      # 1000W allows modest morning export once PV climbs above 100W.
+                      condition:
+                        lambda: 'return id(pv_power).state < 100.0;'
+                      then:
+                        - if:
+                            condition:
+                              lambda: 'return id(max_sell_power).state > 1000.0f;'
+                            then:
+                              - logger.log: "PV < 100W — nighttime reset, sell limit -> 1000W."
+                              - number.set:
+                                  id: max_sell_power
+                                  value: 1000
+                      else:
+                        - if:
+                            # Overvoltage step-down: proportional to how far above the limit
+                            # the grid voltage is (253-254V: -250W, 254-255V: -500W, >255V: -1000W).
+                            condition:
+                              lambda: 'return id(grid_voltage).state >= ${Grid_Max_V};'
+                            then:
+                              - if:
+                                  condition:
+                                    lambda: 'return id(grid_pwr).state < 0;'
+                                  then:
+                                    - lambda: |-
+                                        float v = id(grid_voltage).state;
+                                        float step = (v >= 255.0f) ? 1000.0f :
+                                                     (v >= 254.0f) ? 500.0f : 250.0f;
+                                        float new_val = max(500.0f, id(max_sell_power).state - step);
+                                        if (new_val == id(max_sell_power).state) {
+                                          ESP_LOGD("voltage_follower", "Voltage %.1fV HIGH but limit already at %.0fW — no change.", v, new_val);
+                                          return;
+                                        }
+                                        ESP_LOGI("voltage_follower", "Voltage %.1fV HIGH — reducing limit by %dW (253-254V:-250, 254-255V:-500, >255V:-1000).",
+                                          v, (int)step);
+                                        auto call = id(max_sell_power).make_call();
+                                        call.set_value(new_val);
+                                        call.perform();
+                            else:
+                              - if:
+                                  condition:
+                                    lambda: 'return -id(grid_pwr).state >= (id(max_sell_power).state - 300.0);'
+                                  then:
+                                    - lambda: |-
+                                        float new_val = min(6000.0f, id(max_sell_power).state + 250.0f);
+                                        if (new_val == id(max_sell_power).state) {
+                                          ESP_LOGD("voltage_follower", "Voltage OK, strong export but limit already at %.0fW — no change.", new_val);
+                                          return;
+                                        }
+                                        ESP_LOGI("voltage_follower", "Voltage OK and strong export. Increasing limit by 250W.");
+                                        auto call = id(max_sell_power).make_call();
+                                        call.set_value(new_val);
+                                        call.perform();
+                  # Injection ceiling clamp — runs after every voltage decision while PV > 1W.
+                  # Caps max_sell_power to actual_export + 500W so that when the battery
+                  # suddenly stops charging (hits 100%), the pre-set limit can never cause
+                  # a spike larger than 500W above what was already going to the grid.
+                  - lambda: |-
+                      float actual_export = max(0.0f, -id(grid_pwr).state);
+                      float ceiling = actual_export + 500.0f;
+                      if (id(max_sell_power).state > ceiling) {
+                        ESP_LOGI("voltage_follower", "Ceiling clamp: limit %.0fW > export+500 (%.0f+500=%.0fW) — clamping.",
+                          id(max_sell_power).state, actual_export, ceiling);
+                        auto call = id(max_sell_power).make_call();
+                        call.set_value(ceiling);
+                        call.perform();
+                      };
+          else:
+            - logger.log:
+                level: WARN
+                tag: "voltage_follower"
+                format: "One or more sensors unavailable. Aborting."
+
+sensor:
+  # ── derived ──────────────────────────────────────────────────────────────
+  - platform: template
+    name: "${module_name}_PV_Pwr"
+    id: pv_power
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    update_interval: never
+    icon: "mdi:solar-power-variant"
+
+  # ── PV ───────────────────────────────────────────────────────────────────
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_PV1_Pwr"
+    id: pv1_power
+    register_type: holding
+    address: 186
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    value_type: U_WORD
+    icon: "mdi:solar-power-variant"
+    on_value:
+      then:
+        - sensor.template.publish:
+            id: pv_power
+            state: !lambda |-
+              float pv1 = isnan(id(pv1_power).state) ? 0.0f : id(pv1_power).state;
+              float pv2 = isnan(id(pv2_power).state) ? 0.0f : id(pv2_power).state;
+              return pv1 + pv2;
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_PV2_Pwr"
+    id: pv2_power
+    register_type: holding
+    address: 187
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    value_type: U_WORD
+    icon: "mdi:solar-power-variant"
+    on_value:
+      then:
+        - sensor.template.publish:
+            id: pv_power
+            state: !lambda |-
+              float pv1 = isnan(id(pv1_power).state) ? 0.0f : id(pv1_power).state;
+              float pv2 = isnan(id(pv2_power).state) ? 0.0f : id(pv2_power).state;
+              return pv1 + pv2;
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_PV1_Volt"
+    register_type: holding
+    address: 109
+    unit_of_measurement: "V"
+    device_class: voltage
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:solar-power-variant"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_PV1_Curr"
+    register_type: holding
+    address: 110
+    unit_of_measurement: "A"
+    device_class: current
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:solar-power-variant"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_PV2_Volt"
+    register_type: holding
+    address: 111
+    unit_of_measurement: "V"
+    device_class: voltage
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:solar-power-variant"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_PV2_Curr"
+    register_type: holding
+    address: 112
+    unit_of_measurement: "A"
+    device_class: current
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:solar-power-variant"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Daily_PV_Prod"
+    id: daily_pv_production
+    register_type: holding
+    address: 108
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:solar-power"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Total_PV_Prod"
+    id: total_pv_production
+    register_type: holding
+    address: 96
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_DWORD_R
+    icon: "mdi:solar-power"
+    skip_updates: ${skip_updates_no}
+
+  # ── temperatures ─────────────────────────────────────────────────────────
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_DC_Temp"
+    id: dc_temp
+    register_type: holding
+    address: 90
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 1
+    value_type: S_WORD
+    filters:
+      - offset: -1000
+      - multiply: 0.1
+    icon: "mdi:thermometer"
+    skip_updates: 1
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_AC_Temp"
+    id: ac_temp
+    register_type: holding
+    address: 91
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 1
+    value_type: S_WORD
+    filters:
+      - offset: -1000
+      - multiply: 0.1
+    icon: "mdi:thermometer"
+    skip_updates: 1
+
+  # ── house load ────────────────────────────────────────────────────────────
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_House_Pwr"
+    id: house_pwr
+    register_type: holding
+    address: 178
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    value_type: S_WORD
+    icon: "mdi:home-lightning-bolt"
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Daily_House_Energy"
+    id: daily_load_consumption
+    register_type: holding
+    address: 84
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:home-lightning-bolt"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Total_House_Energy"
+    id: total_consumption
+    register_type: holding
+    address: 85
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_DWORD_R
+    icon: "mdi:home-lightning-bolt"
+    skip_updates: ${skip_updates_no}
+
+  # ── grid ──────────────────────────────────────────────────────────────────
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Grid_Pwr"
+    id: grid_pwr
+    register_type: holding
+    address: 169
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    value_type: S_WORD
+    icon: "mdi:transmission-tower"
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Grid_Volt"
+    id: grid_voltage
+    register_type: holding
+    address: 152
+    unit_of_measurement: "V"
+    device_class: voltage
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:sine-wave"
+    on_value:
+      then:
+        - if:
+            condition:
+              switch.is_on: voltage_follower_enabled
+            then:
+              - script.execute: voltage_follower_logic
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Daily_Energy_Bought"
+    id: daily_energy_bought
+    register_type: holding
+    address: 76
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:transmission-tower-import"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Daily_Energy_Sold"
+    id: daily_energy_sold
+    register_type: holding
+    address: 77
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:transmission-tower-export"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Total_Energy_Bought"
+    id: total_energy_bought
+    register_type: holding
+    address: 78
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:transmission-tower-import"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Total_Energy_Sold"
+    id: total_energy_sold
+    register_type: holding
+    address: 81
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_DWORD_R
+    icon: "mdi:transmission-tower-export"
+    skip_updates: ${skip_updates_no}
+
+  # ── battery ───────────────────────────────────────────────────────────────
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Batt_Temp"
+    register_type: holding
+    address: 182
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: S_WORD
+    icon: "mdi:thermometer"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Batt_Volt"
+    id: battery_voltage
+    register_type: holding
+    address: 183
+    unit_of_measurement: "V"
+    device_class: voltage
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+    value_type: U_WORD
+    icon: "mdi:flash"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Batt_SOC"
+    id: battery_soc
+    register_type: holding
+    address: 184
+    unit_of_measurement: "%"
+    device_class: battery
+    accuracy_decimals: 0
+    value_type: U_WORD
+    icon: "mdi:battery"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Batt_Pwr"
+    id: battery_power
+    register_type: holding
+    address: 190
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    value_type: S_WORD
+    icon: "mdi:lightning-bolt"
+    force_update: true
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Batt_Curr"
+    register_type: holding
+    address: 191
+    unit_of_measurement: "A"
+    device_class: current
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+    value_type: S_WORD
+    icon: "mdi:current-dc"
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Daily_Batt_Chg"
+    id: daily_battery_charge
+    register_type: holding
+    address: 70
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:battery-charging"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Daily_Batt_Dchg"
+    id: daily_battery_discharge
+    register_type: holding
+    address: 71
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_WORD
+    icon: "mdi:battery-minus"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Total_Batt_Chg"
+    id: total_battery_charge
+    register_type: holding
+    address: 72
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_DWORD_R
+    icon: "mdi:battery-charging-100"
+    skip_updates: ${skip_updates_no}
+
+  - platform: modbus_controller
+    modbus_controller_id: deye_modbus_controller
+    name: "${module_name}_Total_Batt_Dchg"
+    id: total_battery_discharge
+    register_type: holding
+    address: 74
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    value_type: U_DWORD_R
+    icon: "mdi:battery-arrow-down"
+    skip_updates: ${skip_updates_no}
+
+switch:
+  - platform: template
+    id: voltage_follower_enabled
+    name: "${module_name}_SmartInject"
+    icon: "mdi:auto-fix"
+    restore_mode: ALWAYS_ON
+    optimistic: true
+
+number:
+  - platform: modbus_controller
+    use_write_multiple: true
+    modbus_controller_id: deye_modbus_controller
+    id: max_sell_power
+    name: "${module_name}_Max_Sell_Power"
+    unit_of_measurement: W
+    device_class: power
+    min_value: 0
+    max_value: 6000
+    step: 250
+    address: 245
+    value_type: U_WORD
+    icon: "mdi:cash-multiple"
+    skip_updates: 2
+
+

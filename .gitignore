@@ -1,0 +1,12 @@
+# ESPHome build artifacts
+esphome/.esphome/
+esphome/build/
+esphome/.pioenvs/
+
+# Secrets — this repo ships secrets.yaml as a placeholder template.
+# After cloning, fill in your real values and keep the file local.
+# Uncomment the line below to prevent git from tracking your real secrets:
+# esphome/secrets.yaml
+
+# Local dev tracking — not for public repo
+status.md
