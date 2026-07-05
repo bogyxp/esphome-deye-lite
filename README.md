@@ -7,8 +7,6 @@ Connecting it to Home Assistant adds live dashboards and energy monitoring.
 Since the module is a generic RS485-to-Wi-Fi bridge, it can be adapted for other Modbus devices beyond Deye inverters.
 Feel free to extend the firmware to suit your needs.
 
-![Module photo](docs/module.jpg)
-
 ---
 
 ## Contents
@@ -32,7 +30,7 @@ When multiple prosumers share the same transformer, the grid voltage rises to a 
 
 ## What it does
 
-The module reads your Deye inverter's internal registers over Modbus RS485 and makes the data available locally via a built-in web interface. 
+The module reads your Deye inverter's internal registers over Modbus RS485 and makes the data available locally via a built-in web interface.
 
 It reports:
 
@@ -146,7 +144,7 @@ Once the module is on your network, Home Assistant will detect it automatically 
 3. Enter the **API encryption key** from the module label. The key is long — scan the QR code and paste it to avoid errors.
 4. Click **Submit**. All entities are added immediately.
 
-> If the device is not discovered automatically after a minute or two, go to **Settings → Devices & Services → Add Integration → ESPHome** and enter the module's IP address manually. Use a scanning app to find it. 
+> If the device is not discovered automatically after a minute or two, go to **Settings → Devices & Services → Add Integration → ESPHome** and enter the module's IP address manually. Use a scanning app to find it.
 
 ### 3. OTA firmware updates *(optional)*
 
@@ -157,7 +155,6 @@ All firmware updates are pushed over Wi-Fi.
 
 **Via the web interface:**
 - The built-in web server provides a firmware upload page accessible from your browser. No ESPHome installation required, though it is needed to compile the firmware from source.
-
 
 ---
 
