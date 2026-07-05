@@ -28,7 +28,6 @@
 #   Added web_server authentication — username and password via !secret
 #   Added fallback hotspot password via !secret
 # ============================================================
-#ADD MQTT OR WIREGUARD FOR TELEMETRY
 
 substitutions:
   module_name: deye-lite
