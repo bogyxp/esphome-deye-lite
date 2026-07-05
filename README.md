@@ -1,6 +1,6 @@
 # esphome-deye-lite
 
-**Local Modbus monitoring and smart export control for Deye hybrid inverters developed in ESPHome.**
+**Local Modbus monitoring and smart export control for Deye hybrid inverters.**
 
 > ESP32-based module that connects to your Deye inverter's RS485 Modbus port and reads inverter data every 5 seconds. The built-in web interface is accessible from any browser on your local network.
 Connecting it to Home Assistant adds live dashboards and energy monitoring.
@@ -44,7 +44,7 @@ Fast sensors update every 5 seconds. Energy totals and temperatures update every
 
 The module also includes the **SmartInject** feature, an automatic export voltage control algorithm that prevents grid overvoltage faults during solar export. See [Software](#software) for details.
 
-Natively compatible with Home Assistant as it is built using ESPHome.
+The firmware runs on ESPHome, so the module integrates directly with Home Assistant.
 
 ---
 
@@ -59,9 +59,9 @@ The module is an ESP32 with an RS485 transceiver and bus protection circuitry.
 #### Data connection
 
 > [!WARNING]
-> Connecting the cable requires opening the inverter's side panel, which exposes live mains connections. **Power off and disconnect the inverter from the grid before opening it.** Route the Ethernet cable through one of the inverter's cable glands — unscrew it, pass the cable through, then re-tighten the gland before closing the panel.
+> Connecting the cable requires opening the inverter's side panel, which exposes live mains connections. **Power off and disconnect the inverter from the grid before opening it.** Route the Ethernet cable through one of the inverter's cable glands: unscrew the gland, pass the cable through, then re-tighten it before closing the panel.
 
-Connect the module to your Deye inverter's **Modbus RS485 port** via a standard Ethernet patch cable. Check your inverter manual for the correct port and pinout before connecting — it varies by model.
+Connect the module to your Deye inverter's **Modbus RS485 port** via a standard Ethernet patch cable. The correct port and pinout vary by model; check your inverter manual before connecting.
 
 On the **SUN-6K-SG03LP1-EU**, plug into the **RS485/METER** RJ45 port.
 
@@ -80,8 +80,8 @@ If your inverter uses a different pinout, terminate your own patch cable using t
 
 #### Power
 
-Plug a USB-C power supply into the module's USB-C port.
-Any 500 mA capable 5 V PSU is suitable — the module draws about 150 mA.
+Plug a power supply into the module's USB-C port.
+Any 500 mA capable 5 V PSU is suitable; the module draws about 150 mA.
 Use a quality power supply; chargers with poor mains isolation can damage the inverter.
 
 ---
@@ -94,7 +94,7 @@ Use a quality power supply; chargers with poor mains isolation can damage the in
 
 When your solar panels produce more than your home can consume, your inverter pushes the surplus to the grid. Since more and more homes do the same, the local grid voltage rises. When it rises above the inverter's protection threshold, your inverter trips an **overvoltage fault** and islands itself to stop exporting, sometimes repeatedly throughout the day.
 
-Deye inverters have a built-in **Max Sell Power** setting that caps grid export, but it is a fixed value and cannot react to what the grid is actually doing at any moment. SmartInject makes that limit dynamic.
+Deye inverters have a built-in **Max Sell Power** setting that caps grid export, but it is a fixed value and cannot react to live grid conditions. SmartInject makes that limit dynamic.
 
 #### How it works
 
@@ -109,11 +109,11 @@ SmartInject watches the grid voltage reading (updated every 5 seconds) and adjus
   - Floor: 500 W (never cuts export entirely)
 - **Voltage OK and grid can take it:** limit rises by 250 W (up to the full 6000 W)
 
-After every adjustment an **injection ceiling clamp** runs: the limit is capped to `actual export + 500 W` to prevent voltage spikes — for example, when the battery finishes charging and the inverter suddenly has excess power available.
+After every adjustment an **injection ceiling clamp** runs: the limit is capped to `actual export + 500 W` to prevent voltage spikes, for example when the battery finishes charging and the inverter suddenly has excess power available.
 
 #### What SmartInject does not do (trade-offs)
 
-SmartInject is not an inject power optimiser. It is mostly a protection algorithm. It keeps your appliances from seeing voltage swing between 255 V and 230 V every few minutes. It only ever writes to the **Max Sell Power** register and does not touch battery charge/discharge settings, time-of-use schedules, or any other inverter configuration.
+SmartInject is not an inject power optimiser. It is a protection algorithm. It keeps your appliances from seeing voltage swing between 255 V and 230 V every few minutes. It only ever writes to the **Max Sell Power** register and does not touch battery charge/discharge settings, time-of-use schedules, or any other inverter configuration.
 
 When voltage is too high, it reduces your export to prevent a fault trip that stops export entirely, at the cost of some export yield.
 
@@ -141,7 +141,7 @@ Once the module is on your network, Home Assistant will detect it automatically 
 
 1. In Home Assistant, go to **Settings → Devices & Services**.
 2. You should see a new ESPHome device discovered. Click **Configure**.
-3. Enter the **API encryption key** from the module label. The key is long — scan the QR code and paste it to avoid errors.
+3. Enter the **API encryption key** from the module label. The key is long; scan the QR code and paste it to avoid errors.
 4. Click **Submit**. All entities are added immediately.
 
 > If the device is not discovered automatically after a minute or two, go to **Settings → Devices & Services → Add Integration → ESPHome** and enter the module's IP address manually. Use a scanning app to find it.
@@ -201,7 +201,7 @@ SmartInject is **on by default**. Toggle the `SmartInject` switch entity in Home
 
 ### Max Sell Power
 
-The `Max_Sell_Power` number entity shows the export limit currently set on the inverter (in watts) and lets you override it manually. SmartInject writes to this same value. If SmartInject is on, any manual value you set will be overwritten on the next voltage reading. If you want to remove the module and put the inverter in the state before adding the module, disable SmartInject, set the value to 6000, then power off and disconnect the module from the inverter.
+The `Max_Sell_Power` number entity shows the export limit currently set on the inverter (in watts) and lets you override it manually. SmartInject writes to this same value. If SmartInject is on, any manual value you set will be overwritten on the next voltage reading. If you want to remove the module and restore the inverter to its original state, disable SmartInject, set the value to 6000, then power off and disconnect the module from the inverter.
 
 ---
 
@@ -241,12 +241,12 @@ The `Max_Sell_Power` number entity shows the export limit currently set on the i
 - Try adding the integration manually via IP address
 
 **All sensors show `unavailable`**
-- Check RS485 wiring — A and B lines may be swapped; try reversing them
+- Check RS485 wiring
 - Confirm Modbus is enabled on the inverter; refer to your inverter's manual for the correct setting
 
 **SmartInject is not adjusting the export limit**
 
-First confirm the `SmartInject` switch is on and that `Grid Voltage` and `PV Power` are showing valid readings — the algorithm only runs when both are available. If those look correct but Max Sell Power stays fixed, your inverter model may use a different register address; check the compatibility notes below.
+First confirm the `SmartInject` switch is on and that `Grid Voltage` and `PV Power` are showing valid readings; the algorithm only runs when both are available. If those look correct but Max Sell Power stays fixed, your inverter model may use a different register address; check the compatibility notes below.
 
 **Fallback hotspot not appearing**
 
