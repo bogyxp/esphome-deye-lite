@@ -1,71 +1,88 @@
 # esphome-deye-lite
 
-> **Draft** — work in progress, not ready for use.
+**Local Modbus monitoring and smart export control for Deye hybrid inverters.**
 
-**Local Modbus monitoring and smart export control for Deye hybrid inverters. No cloud, no subscription.**
-
-> ESP32-based module that connects to your Deye inverter's RS485 Modbus port and reads inverter data every 5 seconds. The built-in web interface is accessible from any browser on your local network. Connecting to Home Assistant adds live dashboards and energy monitoring.
-
-![Module photo](docs/module.jpg)
+> ESP32-based module that connects to your Deye inverter's RS485 Modbus port and reads inverter data every 5 seconds. The built-in web interface is accessible from any browser on your local network.
+Connecting it to Home Assistant adds live dashboards and energy monitoring.
+Since the module is a generic RS485-to-Wi-Fi bridge, it can be adapted for other Modbus devices beyond Deye inverters.
+Feel free to extend the firmware to suit your needs.
 
 ---
 
 ## Contents
 
+- [The overvoltage problem](#the-overvoltage-problem)
 - [What it does](#what-it-does)
 - [Hardware](#hardware)
 - [Software](#software)
 - [Setup](#setup)
 - [How to use](#how-to-use)
-- [Sensors reference](#sensors-reference)
+- [Sensors](#sensors)
 - [Troubleshooting](#troubleshooting)
 - [Compatibility](#compatibility)
 - [License](#license)
 
 ---
 
+## The overvoltage problem
+
+When multiple prosumers share the same transformer, the grid voltage rises to a point that keeps inverters in an injection and error loop. House appliances then see voltage swinging abruptly from 255 V while exporting to 230 V in island mode, when the inverter disconnects from the grid due to high voltage.
+
 ## What it does
 
-The module reads your inverter's internal registers over Modbus RS485 and makes the data available locally via a built-in web interface. No Home Assistant, no MQTT broker, no internet connection required.
+The module reads your Deye inverter's internal registers over Modbus RS485 and makes the data available locally via a built-in web interface.
 
 It reports:
 
 - **Solar production:** PV1 and PV2 power, voltage, current; daily and total yield
 - **Grid:** power (import/export), voltage; daily and total bought/sold energy
-- **Battery:** state of charge, power, current, voltage, temperature; daily and total charge/discharge energy
-- **House load:** real-time consumption power; daily and total energy
+- **Battery:** (if present) state of charge, power, current, voltage, temperature; daily and total charge/discharge energy
+- **House load** *(backup output only)*: real-time consumption power; daily and total energy
 - **Inverter health:** DC and AC temperatures
 
-Fast sensors update every 5 seconds. Energy totals and temperatures update every 60 seconds to avoid saturating the Modbus bus.
+Fast sensors update every 5 seconds. Energy totals and temperatures update every 60 seconds.
 
-The module also includes **SmartInject**, an automatic export voltage control algorithm that prevents grid overvoltage faults during solar export. See [Software](#software) for details.
+The module also includes the **SmartInject** feature, an automatic export voltage control algorithm that prevents grid overvoltage faults during solar export. See [Software](#software) for details.
+
+The firmware runs on ESPHome, so the module integrates directly with Home Assistant.
 
 ---
 
 ## Hardware
 
-### What's in the box
+The module is an ESP32 with an RS485 transceiver and bus protection circuitry.
 
-- ESP32 module PCB with RS485 transceiver
-- 2-pin JST connector for Modbus connection (A / B)
-- 2-pin JST connector for 12 V DC power input
-
-![Hardware photo](docs/hardware.jpg)
+![Hardware photo](docs/img/module.png)
 
 ### Wiring
 
-Connect the module to your Deye inverter's **Modbus RS485 port**. This is typically a 4-pin connector on the inverter's communication board labelled **RS485** or **Modbus**.
+#### Data connection
 
-| Module | Inverter Modbus port |
-|--------|----------------------|
-| RS485 A | A (or +) |
-| RS485 B | B (or −) |
-| 12 V | 12 V auxiliary output |
-| GND | GND |
+> [!WARNING]
+> Connecting the cable requires opening the inverter's side panel, which exposes live mains connections. **Power off and disconnect the inverter from the grid before opening it.** Route the Ethernet cable through one of the inverter's cable glands: unscrew the gland, pass the cable through, then re-tighten it before closing the panel.
 
-> **Cable:** use twisted-pair cable for the A/B signal lines. Standard Cat5e with one pair for A/B and another pair for power works well for runs up to 10 m.
+Connect the module to your Deye inverter's **Modbus RS485 port** via a standard Ethernet patch cable. The correct port and pinout vary by model; check your inverter manual before connecting.
 
-![Wiring diagram](docs/wiring.jpg)
+On the **SUN-6K-SG03LP1-EU**, plug into the **RS485/METER** RJ45 port.
+
+![Wiring diagram](docs/img/Deye_manual_ports.png)
+
+The module's RJ45 pinout matches the SUN-6K-SG03LP1-EU connector:
+
+| Pin | Wire colour | Signal |
+|-----|-------------|--------|
+| 4 | White/Blue | RS485 B |
+| 5 | Blue | RS485 A |
+
+> This module does not provide a ground connection on the RS485 bus as it is not supported by the inverter itself.
+
+If your inverter uses a different pinout, terminate your own patch cable using the blue pair for A/B RS485 lines.
+
+#### Power
+
+Plug a power supply into the module's USB-C port.
+Any 500 mA capable 5 V PSU is suitable; the module draws about 150 mA.
+Use a quality power supply; chargers with poor mains isolation can damage the inverter.
 
 ---
 
@@ -75,9 +92,9 @@ Connect the module to your Deye inverter's **Modbus RS485 port**. This is typica
 
 #### The problem it solves
 
-When your solar panels produce more than your home can consume, your inverter pushes the surplus to the grid. If many homes in your street do the same simultaneously, the local grid voltage rises. When it rises above the inverter's protection threshold, your inverter trips an **overvoltage fault** and stops exporting, sometimes repeatedly throughout the day.
+When your solar panels produce more than your home can consume, your inverter pushes the surplus to the grid. Since more and more homes do the same, the local grid voltage rises. When it rises above the inverter's protection threshold, your inverter trips an **overvoltage fault** and islands itself to stop exporting, sometimes repeatedly throughout the day.
 
-The inverter has a built-in **Max Sell Power** setting that caps grid export, but it is a fixed value and cannot react to what the grid is actually doing at any moment. SmartInject makes this limit dynamic.
+Deye inverters have a built-in **Max Sell Power** setting that caps grid export, but it is a fixed value and cannot react to live grid conditions. SmartInject makes that limit dynamic.
 
 #### How it works
 
@@ -90,30 +107,33 @@ SmartInject watches the grid voltage reading (updated every 5 seconds) and adjus
   - 254–255 V: −500 W
   - above 255 V: −1000 W
   - Floor: 500 W (never cuts export entirely)
-- **Voltage OK and export near the limit:** limit raises by 250 W (up to 6000 W)
+- **Voltage OK and grid can take it:** limit rises by 250 W (up to the full 6000 W)
 
-After every adjustment an **injection ceiling clamp** runs: the limit is capped to `actual export + 500 W` to prevent voltage spikes when the battery finishes charging and the inverter suddenly has extra power available.
+After every adjustment an **injection ceiling clamp** runs: the limit is capped to `actual export + 500 W` to prevent voltage spikes, for example when the battery finishes charging and the inverter suddenly has excess power available.
 
-#### What SmartInject does not do
+#### What SmartInject does not do (trade-offs)
 
-SmartInject is a protective mechanism, not a power optimiser. It only ever writes to the **Max Sell Power** register (register 245). It does not touch battery charge/discharge settings, time-of-use schedules, or any other inverter configuration.
+SmartInject is not an inject power optimiser. It is a protection algorithm. It keeps your appliances from seeing voltage swing between 255 V and 230 V every few minutes. It only ever writes to the **Max Sell Power** register and does not touch battery charge/discharge settings, time-of-use schedules, or any other inverter configuration.
 
-When voltage is high it will reduce your export. This is intentional: the alternative is a fault trip that stops export entirely.
+When voltage is too high, it reduces your export to prevent a fault trip that stops export entirely, at the cost of some export yield.
 
 ---
 
 ## Setup
 
+> **Credentials:** the hotspot password, API encryption key, web username, and web password are all available via the QR code printed on the label on the module. You are free to change them by reflashing the firmware over OTA.
+
 ### 1. First boot and Wi-Fi
 
-1. Power the module from the inverter's 12 V auxiliary output (or a bench supply during setup).
+1. Power the module via the USB-C cable.
 2. Within about 10 seconds the module broadcasts a Wi-Fi hotspot named **`Deye-Lite Fallback Hotspot`**.
-3. Connect your phone or laptop to the hotspot. The **hotspot password** is printed on the label on the module.
+3. Connect your phone to the hotspot using the **hotspot** on the module label.
 4. A captive portal opens automatically. If it doesn't, navigate to `192.168.4.1` in your browser.
-5. Enter your home Wi-Fi network name and password and tap **Save**.
+5. Select your home Wi-Fi network name and password and tap **Save**.
 6. The module reboots and connects to your network. The hotspot disappears.
+7. Use the mDNS hostname or the module's IP address to access the inverter data from your browser.
 
-> The fallback hotspot reappears any time the module cannot reach a known Wi-Fi network, for example after a router change. Re-run the captive portal to reconfigure.
+> The fallback hotspot reappears any time the module cannot reach a known Wi-Fi network, for example after a router change. Re-run the above steps to reconfigure in case you ever change your Wi-Fi password.
 
 ### 2. Adding to Home Assistant *(optional)*
 
@@ -121,10 +141,10 @@ Once the module is on your network, Home Assistant will detect it automatically 
 
 1. In Home Assistant, go to **Settings → Devices & Services**.
 2. You should see a new ESPHome device discovered. Click **Configure**.
-3. Enter the **API encryption key** printed on the label on the module.
+3. Enter the **API encryption key** from the module label. The key is long; scan the QR code and paste it to avoid errors.
 4. Click **Submit**. All entities are added immediately.
 
-> If the device is not discovered automatically after a minute or two, go to **Settings → Devices & Services → Add Integration → ESPHome** and enter the module's IP address manually.
+> If the device is not discovered automatically after a minute or two, go to **Settings → Devices & Services → Add Integration → ESPHome** and enter the module's IP address manually. Use a scanning app to find it.
 
 ### 3. OTA firmware updates *(optional)*
 
@@ -134,12 +154,7 @@ All firmware updates are pushed over Wi-Fi.
 - The [ESPHome device builder](https://esphome.io/guides/getting_started_hassio.html) is available as a Home Assistant add-on or as a [standalone desktop application](https://esphome.io/guides/getting_started_command_line.html). The module advertises itself via mDNS and will appear automatically as an adopted device. Click **Install** to compile and push the update wirelessly.
 
 **Via the web interface:**
-- The built-in web server provides a firmware upload page accessible from your browser. No ESPHome installation required.
-
-**Via CLI:**
-```bash
-esphome run deye-lite.yaml --device <IP address>
-```
+- The built-in web server provides a firmware upload page accessible from your browser. No ESPHome installation required, though it is needed to compile the firmware from source.
 
 ---
 
@@ -148,22 +163,19 @@ esphome run deye-lite.yaml --device <IP address>
 ### Web interface
 
 The module runs a local web server on port 80. Access it from any browser on your network:
-
 ```
 http://deye-lite-<last 6 digits of MAC>.local
 ```
-
 Or use the module's IP address directly if mDNS is not available on your network.
 
-**Username:** printed on the label on the module
-**Password:** printed on the label on the module
+**Username / Password:** scan the QR code on the label.
 
 The web interface shows all live sensor values and lets you:
-- Toggle the SmartInject switch
-- Adjust the Max Sell Power limit manually
+- Toggle the SmartInject switch (defaults to on after a restart)
+- Adjust the Max Sell Power limit manually (only effective when SmartInject is off)
 - Trigger a remote restart
 
-This works entirely without Home Assistant.
+This works without Home Assistant.
 
 ### Home Assistant entities
 
@@ -181,7 +193,7 @@ The module maps directly into the **Home Assistant Energy dashboard** (**Setting
 | Battery in *(optional)* | `..._Total_Batt_Chg` | only if battery fitted |
 | Battery out *(optional)* | `..._Total_Batt_Dchg` | only if battery fitted |
 
-> Entity names above use `deye-inverter` as the example hostname prefix. Your prefix will include your module's MAC suffix; check your device page in Home Assistant for the exact names.
+> Your actual entity names include your module's MAC suffix. Check your device page in Home Assistant for the exact names.
 
 ### SmartInject switch
 
@@ -189,11 +201,11 @@ SmartInject is **on by default**. Toggle the `SmartInject` switch entity in Home
 
 ### Max Sell Power
 
-The `Max_Sell_Power` number entity shows the export limit currently set on the inverter (in watts) and lets you override it manually. SmartInject writes to this same value. If SmartInject is on, any manual value you set will be overwritten on the next voltage reading.
+The `Max_Sell_Power` number entity shows the export limit currently set on the inverter (in watts) and lets you override it manually. SmartInject writes to this same value. If SmartInject is on, any manual value you set will be overwritten on the next voltage reading. If you want to remove the module and restore the inverter to its original state, disable SmartInject, set the value to 6000, then power off and disconnect the module from the inverter.
 
 ---
 
-## Sensors reference
+## Sensors
 
 | Entity | Unit | Update interval |
 |---|---|---|
@@ -229,22 +241,20 @@ The `Max_Sell_Power` number entity shows the export limit currently set on the i
 - Try adding the integration manually via IP address
 
 **All sensors show `unavailable`**
-- Check RS485 wiring: A and B may be swapped; try reversing them
-- Confirm the inverter's Modbus function is enabled (consult your inverter manual)
-- Verify the module is powered
+- Check RS485 wiring
+- Confirm Modbus is enabled on the inverter; refer to your inverter's manual for the correct setting
 
 **SmartInject is not adjusting the export limit**
-- Check that the `SmartInject` switch is on
-- Verify `Grid Voltage` and `PV Power` are showing valid readings; SmartInject only runs when all required sensors have data
-- If Max Sell Power shows a fixed value, the inverter may use a different register address for your model; check the compatibility notes below
+
+First confirm the `SmartInject` switch is on and that `Grid Voltage` and `PV Power` are showing valid readings; the algorithm only runs when both are available. If those look correct but Max Sell Power stays fixed, your inverter model may use a different register address; check the compatibility notes below.
 
 **Fallback hotspot not appearing**
-- Power-cycle the module
-- The hotspot takes up to 30 seconds to appear after boot
+
+Power-cycle the module and wait up to 30 seconds. The hotspot will not appear if the module is still trying to connect to a previously configured network.
 
 **Web interface not reachable**
-- Try the IP address instead of the `.local` hostname
-- Some Android devices have issues with mDNS; use the IP from your router's DHCP table
+
+Try the IP address directly instead of the `.local` hostname. Some Android devices do not resolve mDNS; find the IP in your router's DHCP client list or use a network scanning app.
 
 ---
 
