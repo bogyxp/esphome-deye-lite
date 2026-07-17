@@ -121,7 +121,8 @@ script:
       - if:
           condition:
             lambda: |-
-              return id(pv_power).has_state() &&
+              return id(voltage_follower_enabled).state &&
+                     id(pv_power).has_state() &&
                      id(grid_pwr).has_state() &&
                      id(grid_voltage).has_state() &&
                      id(max_sell_power).has_state();
@@ -207,7 +208,7 @@ script:
             - logger.log:
                 level: WARN
                 tag: "voltage_follower"
-                format: "One or more sensors unavailable. Aborting."
+                format: "SmartInject disabled or sensors unavailable. Aborting."
 
 sensor:
   # ── derived ──────────────────────────────────────────────────────────────
@@ -216,6 +217,7 @@ sensor:
     id: pv_power
     unit_of_measurement: "W"
     device_class: power
+    state_class: measurement
     accuracy_decimals: 0
     update_interval: never
     icon: "mdi:solar-power-variant"
