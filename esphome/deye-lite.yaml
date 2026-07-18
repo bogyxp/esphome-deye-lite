@@ -27,6 +27,13 @@
 #   All sensitive credentials moved to secrets.yaml (no hardcoded values)
 #   Added web_server authentication — username and password via !secret
 #   Added fallback hotspot password via !secret
+# 1.3
+#   All secret keys prefixed with deye-lite_ for namespacing
+#   name_add_mac_suffix commented out
+#   SmartInject guard added inside script — skips if switch is off
+#   pv_power template sensor: added state_class: measurement (fixes HA energy dashboard visibility)
+#   expire_after added to measurement sensors — fast (30s) and slow (3min) via substitution variables
+#   total_increasing (kWh) sensors exempt — expiry causes energy dashboard gaps
 # ============================================================
 
 substitutions:
@@ -34,11 +41,13 @@ substitutions:
   modbus_update_interval_fast: 5s
   skip_updates_no: "12"   # 12 × 5 s = 60 s for slow sensors
   Grid_Max_V: "253.0"
+  expire_fast: 30s         # fast sensors (5 s poll) — 6× headroom
+  expire_slow: 3min        # slow sensors (60 s poll) — 3× headroom
 
 esphome:
   name: deye-lite
   friendly_name: Deye_lite
-  name_add_mac_suffix: true
+  #name_add_mac_suffix: true
   on_boot:
     then:
       - number.set:
@@ -55,29 +64,29 @@ logger:
 
 api:
   encryption:
-    key: !secret api_encryption_key
+    key: !secret deye-lite_api_encryption_key
   reboot_timeout: 0s
 
 ota:
   - platform: esphome
-    password: !secret ota_password
+    password: !secret deye-lite_ota_password
 
 wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
+  ssid: !secret deye-lite_wifi_ssid
+  password: !secret deye-lite_wifi_password
   reboot_timeout: 0s
 
   ap:
     ssid: "Deye-Lite Fallback Hotspot"
-    password: !secret hotspot_pass
+    password: !secret deye-lite_hotspot_pass
 
 captive_portal:
 
 web_server:
   port: 80
   auth:
-    username: !secret web_user
-    password: !secret web_password
+    username: !secret deye-lite_web_user
+    password: !secret deye-lite_web_password
 
 button:
   - platform: restart
@@ -219,6 +228,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 0
     update_interval: never
+    expire_after: ${expire_fast}
     icon: "mdi:solar-power-variant"
 
   # ── PV ───────────────────────────────────────────────────────────────────
@@ -232,6 +242,7 @@ sensor:
     device_class: power
     accuracy_decimals: 0
     value_type: U_WORD
+    expire_after: ${expire_fast}
     icon: "mdi:solar-power-variant"
     on_value:
       then:
@@ -252,6 +263,7 @@ sensor:
     device_class: power
     accuracy_decimals: 0
     value_type: U_WORD
+    expire_after: ${expire_fast}
     icon: "mdi:solar-power-variant"
     on_value:
       then:
@@ -273,6 +285,7 @@ sensor:
     filters:
       - multiply: 0.1
     value_type: U_WORD
+    expire_after: ${expire_slow}
     icon: "mdi:solar-power-variant"
     skip_updates: ${skip_updates_no}
 
@@ -287,6 +300,7 @@ sensor:
     filters:
       - multiply: 0.1
     value_type: U_WORD
+    expire_after: ${expire_slow}
     icon: "mdi:solar-power-variant"
     skip_updates: ${skip_updates_no}
 
@@ -301,6 +315,7 @@ sensor:
     filters:
       - multiply: 0.1
     value_type: U_WORD
+    expire_after: ${expire_slow}
     icon: "mdi:solar-power-variant"
     skip_updates: ${skip_updates_no}
 
@@ -315,6 +330,7 @@ sensor:
     filters:
       - multiply: 0.1
     value_type: U_WORD
+    expire_after: ${expire_slow}
     icon: "mdi:solar-power-variant"
     skip_updates: ${skip_updates_no}
 
@@ -364,6 +380,7 @@ sensor:
     filters:
       - offset: -1000
       - multiply: 0.1
+    expire_after: ${expire_fast}
     icon: "mdi:thermometer"
     skip_updates: 1
 
@@ -380,6 +397,7 @@ sensor:
     filters:
       - offset: -1000
       - multiply: 0.1
+    expire_after: ${expire_fast}
     icon: "mdi:thermometer"
     skip_updates: 1
 
@@ -394,6 +412,7 @@ sensor:
     device_class: power
     accuracy_decimals: 0
     value_type: S_WORD
+    expire_after: ${expire_fast}
     icon: "mdi:home-lightning-bolt"
 
   - platform: modbus_controller
@@ -439,6 +458,7 @@ sensor:
     device_class: power
     accuracy_decimals: 0
     value_type: S_WORD
+    expire_after: ${expire_fast}
     icon: "mdi:transmission-tower"
 
   - platform: modbus_controller
@@ -453,6 +473,7 @@ sensor:
     filters:
       - multiply: 0.1
     value_type: U_WORD
+    expire_after: ${expire_fast}
     icon: "mdi:sine-wave"
     on_value:
       then:
@@ -538,6 +559,7 @@ sensor:
     filters:
       - multiply: 0.1
     value_type: S_WORD
+    expire_after: ${expire_slow}
     icon: "mdi:thermometer"
     skip_updates: ${skip_updates_no}
 
@@ -553,6 +575,7 @@ sensor:
     filters:
       - multiply: 0.01
     value_type: U_WORD
+    expire_after: ${expire_slow}
     icon: "mdi:flash"
     skip_updates: ${skip_updates_no}
 
@@ -566,6 +589,7 @@ sensor:
     device_class: battery
     accuracy_decimals: 0
     value_type: U_WORD
+    expire_after: ${expire_slow}
     icon: "mdi:battery"
     skip_updates: ${skip_updates_no}
 
@@ -579,6 +603,7 @@ sensor:
     device_class: power
     accuracy_decimals: 0
     value_type: S_WORD
+    expire_after: ${expire_fast}
     icon: "mdi:lightning-bolt"
     force_update: true
 
@@ -593,6 +618,7 @@ sensor:
     filters:
       - multiply: 0.01
     value_type: S_WORD
+    expire_after: ${expire_fast}
     icon: "mdi:current-dc"
 
   - platform: modbus_controller
